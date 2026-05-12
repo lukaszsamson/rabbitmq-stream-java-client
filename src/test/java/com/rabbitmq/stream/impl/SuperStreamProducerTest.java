@@ -27,6 +27,7 @@ import com.rabbitmq.stream.EnvironmentBuilder;
 import com.rabbitmq.stream.OffsetSpecification;
 import com.rabbitmq.stream.Producer;
 import io.netty.channel.EventLoopGroup;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -321,6 +322,74 @@ public class SuperStreamProducerTest {
 
     assertThat(latchAssert(publishLatch)).completes(5);
     assertThat(confirmationCodes).hasSize(1).containsExactly(Constants.CODE_PRODUCER_CLOSED);
+  }
+
+  @Test
+  void getLastPublishingIdsShouldReturnPerPartitionLastPublishingId() throws Exception {
+    String[] keys = {"amer", "emea", "apac"};
+    declareSuperStreamTopology(configurationClient, superStream, keys);
+    String producerName = "super-stream-application";
+    Producer producer =
+        environment
+            .producerBuilder()
+            .name(producerName)
+            .superStream(superStream)
+            .routing(message -> message.getApplicationProperties().get("region").toString())
+            .key()
+            .producerBuilder()
+            .build();
+
+    Map<String, Integer> perKeyCount = new HashMap<>();
+    perKeyCount.put("amer", 100);
+    perKeyCount.put("emea", 50);
+    perKeyCount.put("apac", 30);
+    int totalCount = perKeyCount.values().stream().mapToInt(Integer::intValue).sum();
+    CountDownLatch publishLatch = new CountDownLatch(totalCount);
+    AtomicLong nextPid = new AtomicLong(0);
+    Map<String, Long> expectedPerPartition = new HashMap<>();
+    for (String key : keys) {
+      int n = perKeyCount.get(key);
+      long highest = 0;
+      for (int i = 0; i < n; i++) {
+        long pid = nextPid.getAndIncrement();
+        highest = pid;
+        producer.send(
+            producer
+                .messageBuilder()
+                .publishingId(pid)
+                .applicationProperties()
+                .entry("region", key)
+                .messageBuilder()
+                .build(),
+            confirmationStatus -> publishLatch.countDown());
+      }
+      expectedPerPartition.put(superStream + "-" + key, highest);
+    }
+    assertThat(latchAssert(publishLatch)).completes(5);
+
+    Map<String, Long> publishingIds =
+        ((com.rabbitmq.stream.SuperStreamProducer) producer).getLastPublishingIds();
+    assertThat(publishingIds).containsExactlyInAnyOrderEntriesOf(expectedPerPartition);
+
+    Client client = cf.get();
+    for (Map.Entry<String, Long> e : expectedPerPartition.entrySet()) {
+      assertThat(client.queryPublisherSequence(producerName, e.getKey())).isEqualTo(e.getValue());
+    }
+  }
+
+  @Test
+  void getLastPublishingIdsShouldThrowIfProducerHasNoName() {
+    declareSuperStreamTopology(configurationClient, superStream, partitions);
+    Producer producer =
+        environment
+            .producerBuilder()
+            .superStream(superStream)
+            .routing(message -> message.getProperties().getMessageIdAsString())
+            .producerBuilder()
+            .build();
+    assertThatThrownBy(
+            () -> ((com.rabbitmq.stream.SuperStreamProducer) producer).getLastPublishingIds())
+        .isInstanceOf(IllegalStateException.class);
   }
 
   @Test

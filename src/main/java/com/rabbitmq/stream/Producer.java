@@ -42,7 +42,21 @@ public interface Producer extends AutoCloseable {
    * <p>The value can be mapped to a business index to restart publishing where a previous
    * incarnation of the producer left off.
    *
+   * <p>On a super stream this returns a single scalar over partitions that advance independently
+   * and is <strong>not</strong> a per-partition last-stored ID. The current implementation returns
+   * the unsigned-min of the per-partition last publishing IDs; this scalar is unsafe as a resume
+   * primitive because publishing IDs derived from it (such as {@code getLastPublishingId() + 1})
+   * can land on a partition whose own stored last publishing ID is higher and be silently
+   * deduplicated by the broker. Super stream callers should use {@link
+   * SuperStreamProducer#getLastPublishingIds()} instead and pick the entry for the partition the
+   * next message will be routed to.
+   *
+   * <p>The automatic publishing-ID sequence used when no explicit {@code publishingId} is set is
+   * <strong>not</strong> seeded from this value; each partition's underlying producer queries its
+   * own last publishing ID independently.
+   *
    * @return the last publishing ID for this named producer
+   * @see SuperStreamProducer#getLastPublishingIds()
    */
   long getLastPublishingId();
 

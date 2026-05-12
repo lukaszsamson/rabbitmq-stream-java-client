@@ -25,6 +25,8 @@ import com.rabbitmq.stream.MessageBuilder;
 import com.rabbitmq.stream.Producer;
 import com.rabbitmq.stream.RoutingStrategy;
 import com.rabbitmq.stream.RoutingStrategy.Metadata;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -34,7 +36,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-class SuperStreamProducer implements Producer {
+class SuperStreamProducer implements com.rabbitmq.stream.SuperStreamProducer {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(SuperStreamProducer.class);
 
@@ -81,39 +83,54 @@ class SuperStreamProducer implements Producer {
     return codec.messageBuilder();
   }
 
+  /**
+   * Returns the unsigned-min of the per-partition last publishing IDs for backwards compatibility.
+   *
+   * <p>This scalar cannot safely describe the state of a super stream; callers should use {@link
+   * #getLastPublishingIds()} instead and pick the entry for the partition the next message will be
+   * routed to.
+   */
   @Override
+  @Deprecated
   public long getLastPublishingId() {
-    if (this.name != null && !this.name.isEmpty()) {
-      List<String> streams =
-          this.environment.locatorOperation(
-              namedFunction(
-                  c -> c.partitions(superStream),
-                  "Partition lookup for super stream '%s'",
-                  this.superStream));
-      long publishingId = 0;
-      boolean first = true;
-      for (String partition : streams) {
-        long pubId =
-            this.environment.locatorOperation(
-                namedFunction(
-                    c -> c.queryPublisherSequence(this.name, partition),
-                    "Publisher sequence query for on partition '%s' of super stream '%s', publisher name '%s'",
-                    partition,
-                    this.superStream,
-                    this.name));
-        if (first) {
-          publishingId = pubId;
-          first = false;
-        } else {
-          if (Long.compareUnsigned(publishingId, pubId) > 0) {
-            publishingId = pubId;
-          }
-        }
+    Map<String, Long> publishingIds = getLastPublishingIds();
+    long publishingId = 0;
+    boolean first = true;
+    for (long pubId : publishingIds.values()) {
+      if (first) {
+        publishingId = pubId;
+        first = false;
+      } else if (Long.compareUnsigned(publishingId, pubId) > 0) {
+        publishingId = pubId;
       }
-      return publishingId;
-    } else {
+    }
+    return publishingId;
+  }
+
+  @Override
+  public Map<String, Long> getLastPublishingIds() {
+    if (this.name == null || this.name.isEmpty()) {
       throw new IllegalStateException("The producer has no name");
     }
+    List<String> partitions =
+        this.environment.locatorOperation(
+            namedFunction(
+                c -> c.partitions(superStream),
+                "Partition lookup for super stream '%s'",
+                this.superStream));
+    Map<String, Long> publishingIds = new LinkedHashMap<>();
+    for (String partition : partitions) {
+      long pubId =
+          this.environment.locatorOperation(
+              namedFunction(
+                  c -> c.queryPublisherSequence(this.name, partition),
+                  "Publisher sequence query for partition '%s' of super stream '%s', publisher name '%s'",
+                  partition,
+                  this.superStream,
+                  this.name));
+      publishingIds.put(partition, pubId);
+    }
+    return Collections.unmodifiableMap(publishingIds);
   }
 
   @Override
